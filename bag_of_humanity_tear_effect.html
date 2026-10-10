@@ -1,0 +1,1092 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The History Dump</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Three.js for 3D rendering -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- RGBELoader and GLTFLoader from the Three.js examples (matches the r128 build above) -->
+    <script src="https://unpkg.com/three@0.128.0/examples/js/loaders/RGBELoader.js"></script>
+    <script src="https://unpkg.com/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+    <!-- MediaPipe for Hand Tracking -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; color: white; font-family: 'Inter', sans-serif; }
+        #canvas-container { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1; }
+        .webcam-feed { position: absolute; bottom: 20px; right: 20px; width: 160px; height: 120px; border-radius: 8px; border: 2px solid #333; object-fit: cover; transform: scaleX(-1); z-index: 20; opacity: 0.3; }
+        
+        #ui-layer { position: absolute; inset: 0; z-index: 50; display: flex; flex-direction: column; align-items: center; justify-content: center; background: rgba(5,5,5,0.8); transition: opacity 1s ease; backdrop-filter: blur(5px); pointer-events: none; }
+        .instruction-text { opacity: 0; transition: opacity 0.5s ease; transform: translateY(10px); }
+        .instruction-text.visible { opacity: 1; transform: translateY(0); }
+
+        #hand-cursors { position: absolute; inset: 0; z-index: 60; pointer-events: none; }
+        .hand-cursor {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 22px;
+            height: 22px;
+            margin-left: -11px;
+            margin-top: -11px;
+            border-radius: 50%;
+            background: #3b82f6;
+            box-shadow: 0 0 0 2px rgba(255,255,255,0.35), 0 0 16px rgba(59,130,246,0.95);
+            opacity: 0;
+            transition: background 0.1s ease, box-shadow 0.1s ease, opacity 0.12s ease;
+        }
+        .hand-cursor.visible { opacity: 1; }
+        .hand-cursor.pinched {
+            background: #ef4444;
+            box-shadow: 0 0 0 2px rgba(255,255,255,0.4), 0 0 16px rgba(239,68,68,0.95);
+        }
+
+        /* Specimen placard. Hidden until a pinch actually holds an artifact. */
+        #artifact-panel {
+            position: fixed;
+            top: 50%;
+            left: 22px;
+            z-index: 55;
+            width: min(332px, calc(100vw - 44px));
+            max-height: calc(100vh - 32px);
+            overflow: auto;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+            padding: 16px 16px 18px;
+            color: #ebe6dc;
+            background:
+                linear-gradient(180deg, rgba(22, 24, 28, 0.82), rgba(8, 9, 12, 0.78));
+            border: 1px solid rgba(214, 177, 106, 0.38);
+            border-radius: 18px;
+            box-shadow:
+                0 24px 60px rgba(0, 0, 0, 0.48),
+                inset 0 1px 0 rgba(255, 255, 255, 0.06);
+            backdrop-filter: blur(18px) saturate(1.15);
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+            transform: translate(-16px, -50%);
+            transition: opacity 0.12s ease, transform 0.12s ease, visibility 0s linear 0.12s;
+        }
+        #artifact-panel.visible {
+            opacity: 1;
+            visibility: visible;
+            transform: translate(0, -50%);
+            transition: opacity 0.12s ease, transform 0.12s ease, visibility 0s linear 0s;
+        }
+        #artifact-panel * { box-sizing: border-box; }
+        .artifact-panel-head {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 12px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 11px;
+            letter-spacing: 0.18em;
+            text-transform: uppercase;
+            color: rgba(214, 177, 106, 0.9);
+        }
+        #artifact-preview {
+            position: relative;
+            width: 100%;
+            aspect-ratio: 1;
+            border-radius: 12px;
+            overflow: hidden;
+            background:
+                radial-gradient(circle at 50% 42%, rgba(48, 62, 84, 0.95), rgba(8, 10, 14, 0.96) 72%);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: inset 0 0 40px rgba(0, 0, 0, 0.35);
+        }
+        #artifact-preview canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+        #artifact-preview::after {
+            content: "";
+            position: absolute;
+            inset: 10px;
+            border: 1px solid rgba(214, 177, 106, 0.28);
+            border-radius: 8px;
+            pointer-events: none;
+        }
+        .artifact-copy { display: flex; flex-direction: column; gap: 6px; }
+        #artifact-title {
+            margin: 0;
+            font-family: Georgia, "Iowan Old Style", Palatino, serif;
+            font-size: 22px;
+            font-weight: 500;
+            line-height: 1.15;
+            letter-spacing: -0.01em;
+            color: #f4f0e8;
+        }
+        #artifact-year {
+            margin: 0;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 11px;
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+            color: #d6b16a;
+        }
+        #artifact-summary {
+            margin: 4px 0 0;
+            font-size: 13.5px;
+            line-height: 1.45;
+            color: rgba(235, 230, 220, 0.78);
+        }
+        .artifact-stats {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            padding-top: 12px;
+            border-top: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        .artifact-label {
+            display: block;
+            margin-bottom: 4px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 10px;
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+            color: rgba(235, 230, 220, 0.45);
+        }
+        #artifact-rarity,
+        #artifact-value {
+            display: block;
+            font-size: 14px;
+            font-weight: 600;
+            line-height: 1.3;
+            color: #f4f0e8;
+        }
+        #artifact-rarity[data-rarity="Common"] { color: #b7b1a8; }
+        #artifact-rarity[data-rarity="Uncommon"] { color: #8dceab; }
+        #artifact-rarity[data-rarity="Rare"] { color: #8eb8ff; }
+        #artifact-rarity[data-rarity="Very Rare"] { color: #d0a6ff; }
+        #artifact-rarity[data-rarity="Extremely Rare"] { color: #ff9b6a; }
+        #artifact-rarity[data-rarity="Legendary"] { color: #f0c36a; }
+        #artifact-rarity[data-rarity="Unique"] { color: #ff7d7d; }
+        #artifact-rarity[data-rarity="Unique Context"] { color: #e6c07b; }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <h1 class="text-4xl md:text-6xl font-light tracking-widest text-white uppercase mb-4 text-center">The History Dump</h1>
+        
+        <div id="status-loading" class="flex flex-col items-center">
+            <p class="text-gray-400 mb-6 text-center max-w-md font-mono text-sm tracking-wider">Camera Loading...<br/>Please allow camera access.</p>
+            <div class="w-8 h-8 border-2 border-gray-600 border-t-white rounded-full animate-spin"></div>
+        </div>
+
+        <div id="status-searching" class="instruction-text hidden flex-col items-center mt-8">
+            <p class="text-xl text-gray-400 font-mono tracking-wide text-center">Looking for hands...</p>
+        </div>
+
+        <div id="status-one-hand" class="instruction-text hidden flex-col items-center mt-8">
+            <p class="text-xl text-yellow-400 font-mono tracking-wide text-center">1 hand detected. Need 2 to tear!</p>
+        </div>
+
+        <div id="status-detected" class="instruction-text hidden flex-col items-center mt-8">
+            <svg class="w-16 h-16 text-white/50 mb-4 animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"></path></svg>
+            <p class="text-2xl text-green-400 font-bold tracking-wide text-center">Hands Detected!<br/>Pull your hands apart to tear.</p>
+        </div>
+    </div>
+
+    <video id="input-video" class="webcam-feed" autoplay playsinline muted></video>
+    <div id="canvas-container"></div>
+    <div id="hand-cursors"></div>
+
+    <aside id="artifact-panel" aria-hidden="true" aria-label="Held artifact">
+        <div class="artifact-panel-head">
+            <span class="artifact-kicker">Specimen</span>
+            <span id="artifact-index">No. 00</span>
+        </div>
+        <div id="artifact-preview"></div>
+        <div class="artifact-copy">
+            <h2 id="artifact-title"></h2>
+            <p id="artifact-year"></p>
+            <p id="artifact-summary"></p>
+        </div>
+        <div class="artifact-stats">
+            <div>
+                <span class="artifact-label">Rarity</span>
+                <strong id="artifact-rarity"></strong>
+            </div>
+            <div>
+                <span class="artifact-label">Value</span>
+                <strong id="artifact-value"></strong>
+            </div>
+        </div>
+    </aside>
+
+    <script>
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x020205, 0.015);
+
+        // Standard Perspective Camera
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 0, 10);
+        
+        // Add camera to scene so objects attached to it render properly
+        scene.add(camera);
+
+        const listener = new THREE.AudioListener();
+        camera.add(listener);
+        const tearSound = new THREE.Audio(listener);
+        tearSound.setLoop(false);
+        tearSound.setVolume(1);
+        let tearSoundPlayed = false;
+        let tearSoundPending = false;
+
+        function playTearOnce() {
+            if (tearSoundPlayed) return;
+            if (!tearSound.buffer) {
+                tearSoundPending = true;
+                return;
+            }
+            tearSoundPlayed = true;
+            tearSoundPending = false;
+            const start = () => {
+                if (!tearSound.isPlaying) tearSound.play();
+            };
+            if (listener.context.state === 'suspended') {
+                listener.context.resume().then(start);
+            } else {
+                start();
+            }
+        }
+
+        // Browsers keep AudioContext suspended until a gesture on the page.
+        window.addEventListener('pointerdown', () => {
+            if (listener.context.state === 'suspended') listener.context.resume();
+        });
+
+        const audioLoader = new THREE.AudioLoader();
+        audioLoader.load('tear.mp3', (buffer) => {
+            tearSound.setBuffer(buffer);
+            if (tearSoundPending) playTearOnce();
+        });
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Limit pixel ratio for performance
+        renderer.outputEncoding = THREE.sRGBEncoding;
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.0;
+        container.appendChild(renderer.domElement);
+
+        // HDRI lights and reflects on the artifacts only. The void stays black:
+        // scene.background is intentionally left unset.
+        // r128 cannot sample an equirectangular map directly on MeshStandardMaterial,
+        // so the loaded texture is converted to a PMREM environment map first.
+        const pmremGenerator = new THREE.PMREMGenerator(renderer);
+        pmremGenerator.compileEquirectangularShader();
+        let environmentMap = null;
+
+        function applyEnvironment(root) {
+            if (!environmentMap || !root) return;
+            root.traverse((child) => {
+                if (!child.isMesh || !child.material) return;
+                const materials = Array.isArray(child.material) ? child.material : [child.material];
+                for (let i = 0; i < materials.length; i++) {
+                    const mat = materials[i];
+                    if (!mat || !('envMap' in mat)) continue;
+                    mat.envMap = environmentMap;
+                    if ('envMapIntensity' in mat) mat.envMapIntensity = 1;
+                    mat.needsUpdate = true;
+                }
+            });
+        }
+
+        new THREE.RGBELoader().load('historic_cloister_passage_4k.hdr', (texture) => {
+            texture.mapping = THREE.EquirectangularReflectionMapping;
+            environmentMap = pmremGenerator.fromEquirectangular(texture).texture;
+            scene.environment = environmentMap;
+            // The placard uses its own renderer, so it needs its own PMREM.
+            const previewPmrem = new THREE.PMREMGenerator(previewRenderer);
+            previewPmrem.compileEquirectangularShader();
+            previewScene.environment = previewPmrem.fromEquirectangular(texture).texture;
+            texture.dispose();
+            pmremGenerator.dispose();
+            previewPmrem.dispose();
+            artifacts.forEach(applyEnvironment);
+        });
+
+        // We use a plane placed right in front of the camera that scales to fit the FOV
+        const planeGeo = new THREE.PlaneGeometry(1, 1, 64, 64);
+
+        const bagTexture = new THREE.TextureLoader().load('./trash_bag_texture.jpg', (texture) => {
+            tearMaterial.uniforms.uTextureSize.value.set(texture.image.width, texture.image.height);
+        });
+        bagTexture.encoding = THREE.sRGBEncoding;
+        bagTexture.wrapS = THREE.ClampToEdgeWrapping;
+        bagTexture.wrapT = THREE.ClampToEdgeWrapping;
+        bagTexture.minFilter = THREE.LinearFilter;
+        bagTexture.magFilter = THREE.LinearFilter;
+
+        // Photographed plastic, with the tear still cutting through the image.
+        const tearMaterial = new THREE.ShaderMaterial({
+            uniforms: {
+                uTexture: { value: bagTexture },
+                uTextureSize: { value: new THREE.Vector2(1376, 768) },
+                u_time: { value: 0 },
+                u_tearWidth: { value: 0.0 }, // 0.0 = closed, 1.0 = fully open
+                u_aspect: { value: window.innerWidth / window.innerHeight }
+            },
+            vertexShader: `
+                varying vec2 vUv;
+                void main() {
+                    vUv = uv;
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                }
+            `,
+            fragmentShader: `
+                uniform sampler2D uTexture;
+                uniform vec2 uTextureSize;
+                uniform float u_time;
+                uniform float u_tearWidth;
+                uniform float u_aspect;
+                varying vec2 vUv;
+
+                // Simple 2D noise function
+                vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+                vec2 mod289(vec2 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+                vec3 permute(vec3 x) { return mod289(((x*34.0)+1.0)*x); }
+                float snoise(vec2 v) {
+                    const vec4 C = vec4(0.211324865405187, 0.366025403784439, -0.577350269189626, 0.024390243902439);
+                    vec2 i  = floor(v + dot(v, C.yy) );
+                    vec2 x0 = v -   i + dot(i, C.xx);
+                    vec2 i1;
+                    i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+                    vec4 x12 = x0.xyxy + C.xxzz;
+                    x12.xy -= i1;
+                    i = mod289(i);
+                    vec3 p = permute( permute( i.y + vec3(0.0, i1.y, 1.0 )) + i.x + vec3(0.0, i1.x, 1.0 ));
+                    vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy), dot(x12.zw,x12.zw)), 0.0);
+                    m = m*m ;
+                    m = m*m ;
+                    vec3 x = 2.0 * fract(p * C.www) - 1.0;
+                    vec3 h = abs(x) - 0.5;
+                    vec3 ox = floor(x + 0.5);
+                    vec3 a0 = x - ox;
+                    m *= 1.79284291400159 - 0.85373472095314 * ( a0*a0 + h*h );
+                    vec3 g;
+                    g.x  = a0.x  * x0.x  + h.x  * x0.y;
+                    g.yz = a0.yz * x12.xz + h.yz * x12.yw;
+                    return 130.0 * dot(m, g);
+                }
+
+                // background-size: cover. Crop whichever axis is longer so the
+                // photo fills the screen without stretching or letterboxing.
+                vec2 coverUv(vec2 uv) {
+                    float imageAspect = uTextureSize.x / max(uTextureSize.y, 1.0);
+                    vec2 cover = vec2(1.0);
+                    if (u_aspect > imageAspect) {
+                        cover.y = imageAspect / u_aspect;
+                    } else {
+                        cover.x = u_aspect / imageAspect;
+                    }
+                    return (uv - 0.5) * cover + 0.5;
+                }
+
+                void main() {
+                    vec2 uv = vUv;
+                    vec3 baseColor = texture2D(uTexture, coverUv(uv)).rgb;
+                    
+                    // Jagged tear calculation
+                    // The center of the tear drifts slightly
+                    float tearCenterOffset = snoise(vec2(uv.y * 3.0, u_time * 0.2)) * 0.1;
+                    float tearCenter = 0.5 + tearCenterOffset;
+                    
+                    float distFromCenter = abs(uv.x - tearCenter);
+                    
+                    // The edges of the tear are jagged
+                    float edgeJaggedness = snoise(vec2(uv.y * 10.0, 0.0)) * 0.05 + snoise(vec2(uv.y * 30.0, u_time * 0.5)) * 0.02;
+                    float dynamicThreshold = (u_tearWidth * 0.5) + edgeJaggedness * (u_tearWidth > 0.01 ? 1.0 : 0.0);
+                    
+                    if (u_tearWidth > 0.01 && distFromCenter < dynamicThreshold) {
+                        discard; // Reveal the 3D scene behind
+                    }
+                    
+                    // Bright edge highlight where the plastic is stretched and torn
+                    float edgeDist = distFromCenter - dynamicThreshold;
+                    if (u_tearWidth > 0.01 && edgeDist > 0.0 && edgeDist < 0.015) {
+                        float intensity = 1.0 - (edgeDist / 0.015);
+                        baseColor = mix(baseColor, vec3(0.8, 0.9, 1.0), intensity * 0.8);
+                    }
+
+                    gl_FragColor = vec4(baseColor, 1.0);
+                }
+            `,
+            side: THREE.DoubleSide,
+            transparent: true // Necessary for discard to reveal background
+        });
+
+        const tearPlane = new THREE.Mesh(planeGeo, tearMaterial);
+        // Place plane directly in front of the camera
+        tearPlane.position.z = -1;
+        camera.add(tearPlane);
+
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+        scene.add(ambientLight);
+
+        const pointLight1 = new THREE.PointLight(0x7788ff, 1, 50);
+        pointLight1.position.set(5, 5, 5);
+        scene.add(pointLight1);
+
+        const pointLight2 = new THREE.PointLight(0xffaa55, 0.8, 50);
+        pointLight2.position.set(-5, -5, 2);
+        scene.add(pointLight2);
+
+        // Checklist metadata, looked up by the .glb file name on the held mesh.
+        const ARTIFACT_CATALOG = [
+            { id: 1, fileName: "flint_flake.glb", title: "Paleolithic Flint Flake", year: "c. 2.5 Million BCE", summary: "A sharp stone flake discarded by an early hominid during the creation of a primitive hand axe.", rarity: "Common", value: "$50 - $200" },
+            { id: 2, fileName: "bone_stylus.glb", title: "Bloodstained Bone Stylus", year: "March 15 44 BCE", summary: "A snapped Roman writing tool dropped during the chaotic assassination of Julius Caesar.", rarity: "Unique", value: "Priceless" },
+            { id: 3, fileName: "carbonized_fig.glb", title: "Carbonized Fig", year: "79 CE", summary: "A half-eaten fig instantly turned to charcoal by the volcanic ash of Mount Vesuvius.", rarity: "Extremely Rare", value: "$10,000 - $25,000" },
+            { id: 4, fileName: "gutenberg_e.glb", title: "Gutenberg Type Block ('e')", year: "c. 1440", summary: "A defective lead-alloy letter 'e' discarded from Johannes Gutenberg's original printing press.", rarity: "Legendary", value: "$500,000+" },
+            { id: 5, fileName: "mosaic_shard.glb", title: "Byzantine Mosaic Shard", year: "1453", summary: "A shattered piece of golden glass blasted from the walls of Constantinople during its fall.", rarity: "Rare", value: "$2,000 - $5,000" },
+            { id: 6, fileName: "hardtack_biscuit.glb", title: "Santa María Hardtack", year: "October 12 1492", summary: "A rock-hard ship's biscuit surviving from Christopher Columbus's first voyage.", rarity: "Unique", value: "Priceless" },
+            { id: 7, fileName: "iron_padlock.glb", title: "Bastille Prison Padlock", year: "July 14 1789", summary: "A heavy iron padlock smashed open by Parisian revolutionaries during the storming of the Bastille.", rarity: "Extremely Rare", value: "$50,000 - $100,000" },
+            { id: 8, fileName: "wright_scrap.glb", title: "Wright Flyer Fabric Scrap", year: "December 17 1903", summary: "A torn piece of unbleached muslin cloth from the first successful powered aircraft.", rarity: "Very Rare", value: "$10,000 - $20,000" },
+            { id: 9, fileName: "titanic_tag.glb", title: "Titanic Luggage Tag", year: "April 1912", summary: "A waterlogged White Star Line first-class luggage tag recovered from the freezing Atlantic.", rarity: "Extremely Rare", value: "$75,000 - $150,000" },
+            { id: 10, fileName: "melted_bottle.glb", title: "Melted Glass Bottle", year: "August 6 1945", summary: "A glass soda bottle warped into iridescent slag by the intense heat of the Hiroshima atomic bomb.", rarity: "Rare", value: "Museum Collection Only" },
+            { id: 11, fileName: "punch_card.glb", title: "AI Conference Punch Card", year: "1956", summary: "A coffee-stained computer punch card used at the Dartmouth workshop where artificial intelligence was born.", rarity: "Rare", value: "$1,000 - $3,000" },
+            { id: 12, fileName: "ticket_stub.glb", title: "Ed Sullivan Ticket Stub", year: "February 9 1964", summary: "A crumpled audience ticket from The Beatles' history-making American television debut.", rarity: "Very Rare", value: "$8,000 - $15,000" },
+            { id: 13, fileName: "ration_packet.glb", title: "Apollo 11 Lunar Ration", year: "July 20 1969", summary: "A silver foil food packet discarded on the surface of the Moon by the Apollo 11 crew.", rarity: "Legendary", value: "Federal Property ($1M+)" },
+            { id: 14, fileName: "muddy_sunglasses.glb", title: "Woodstock Sunglasses", year: "August 1969", summary: "Mud-caked sunglasses lost in the trampled fields of the Woodstock music festival.", rarity: "Uncommon", value: "$300 - $800" },
+            { id: 15, fileName: "napkin_note.glb", title: "Elvis's Oval Office Napkin", year: "December 21 1970", summary: "A hastily scribbled hotel napkin note from Elvis Presley requesting a federal agent badge from Richard Nixon.", rarity: "Unique", value: "$100,000+" },
+            { id: 16, fileName: "cassette_tape.glb", title: "Unspooled Cassette Tape", year: "July 1 1979", summary: "A chaotic knot of magnetic tape symbolizing the launch of the Sony Walkman and the personal audio revolution.", rarity: "Common", value: "$5 - $20" },
+            { id: 17, fileName: "silver_sequin.glb", title: "Motown 25 Silver Sequin", year: "March 25 1983", summary: "A single fallen sequin from the stage where Michael Jackson debuted the Moonwalk.", rarity: "Very Rare", value: "$5,000 - $10,000" },
+            { id: 18, fileName: "new_coke_can.glb", title: "New Coke Can", year: "April 23 1985", summary: "A sticky aluminum can representing one of the most infamous marketing blunders in corporate history.", rarity: "Uncommon", value: "$50 - $150" },
+            { id: 19, fileName: "tv_dial.glb", title: "Snapped TV Dial", year: "January 28 1986", summary: "A broken channel-tuning dial from a classroom television that broadcast the Challenger disaster.", rarity: "Unique Context", value: "N/A" },
+            { id: 20, fileName: "dosimeter.glb", title: "Chernobyl Dosimeter Badge", year: "April 26 1986", summary: "A heavily irradiated Soviet radiation detector permanently maxed out during the Chernobyl nuclear disaster.", rarity: "Very Rare", value: "$3,000 - $6,000" },
+            { id: 21, fileName: "berlin_wall_chunk.glb", title: "Painted Berlin Wall Chunk", year: "November 9 1989", summary: "A heavy piece of concrete covered in neon spray paint from the fall of the Iron Curtain.", rarity: "Common", value: "$50 - $200" },
+            { id: 22, fileName: "y2k_beans.glb", title: "Y2K Rations (Baked Beans)", year: "December 31 1999", summary: "An unopened can of baked beans hoarded during the global panic over the Year 2000 computer bug.", rarity: "Uncommon", value: "$10 - $30" },
+            { id: 23, fileName: "dusty_mouse.glb", title: "9/11 Office Mouse", year: "September 11 2001", summary: "A standard computer mouse entirely encased in pulverized concrete dust from Ground Zero.", rarity: "Rare", value: "Museum Collection Only" },
+            { id: 24, fileName: "denim_scrap.glb", title: "Indie Sleaze Denim Scrap", year: "Mid-2000s", summary: "A violently distressed scrap of painfully tight black denim from the peak of the underground indie rock era.", rarity: "Common", value: "$0" },
+            { id: 25, fileName: "snipped_earbuds.glb", title: "Severed Earbuds", year: "September 2016", summary: "A pair of wired earbuds violently snipped to symbolize Apple's controversial removal of the headphone jack.", rarity: "Common", value: "$0" },
+            { id: 26, fileName: "purple_confetti.glb", title: "BTS Stadium Confetti", year: "Late 2010s", summary: "A crumpled piece of metallic purple star confetti from the height of the global K-Pop stadium wave.", rarity: "Common", value: "$10 - $50" }
+        ];
+        const artifactsByFileName = Object.create(null);
+        for (let i = 0; i < ARTIFACT_CATALOG.length; i++) {
+            artifactsByFileName[ARTIFACT_CATALOG[i].fileName] = ARTIFACT_CATALOG[i];
+        }
+
+        const artifacts = [];
+        const artifactGroup = new THREE.Group();
+        scene.add(artifactGroup);
+
+        // Longest side of every loaded model, in world units.
+        const TARGET_SIZE = 1.4;
+        const gltfLoader = new THREE.GLTFLoader();
+        const grabRayLocal = new THREE.Ray();
+        const grabRayInverse = new THREE.Matrix4();
+        const grabHit = new THREE.Vector3();
+
+        // Pinch tests this box on the parent group. The glTF meshes are too
+        // dense to raycast triangle-by-triangle while the hand is tracking.
+        function enableArtifactRaycast(group) {
+            group.raycast = function (raycaster, intersects) {
+                if (!this.userData.ready || !this.userData.bounds) return;
+                this.updateWorldMatrix(true, false);
+                grabRayInverse.copy(this.matrixWorld).invert();
+                grabRayLocal.copy(raycaster.ray).applyMatrix4(grabRayInverse);
+                if (!grabRayLocal.intersectBox(this.userData.bounds, grabHit)) return;
+                grabHit.applyMatrix4(this.matrixWorld);
+                intersects.push({
+                    distance: raycaster.ray.origin.distanceTo(grabHit),
+                    point: grabHit.clone(),
+                    object: this
+                });
+            };
+        }
+
+        function fitLoadedModel(model) {
+            const box = new THREE.Box3().setFromObject(model);
+            const size = new THREE.Vector3();
+            const center = new THREE.Vector3();
+            box.getSize(size);
+            box.getCenter(center);
+            const maxDim = Math.max(size.x, size.y, size.z);
+            const fitted = new THREE.Group();
+            const bounds = new THREE.Box3();
+            if (!isFinite(maxDim) || maxDim < 1e-6) {
+                fitted.add(model);
+                fitted.scale.setScalar(TARGET_SIZE);
+                const half = TARGET_SIZE / 2;
+                bounds.set(
+                    new THREE.Vector3(-half, -half, -half),
+                    new THREE.Vector3(half, half, half)
+                );
+                return { fitted: fitted, bounds: bounds };
+            }
+            model.position.sub(center);
+            fitted.add(model);
+            const fit = TARGET_SIZE / maxDim;
+            fitted.scale.setScalar(fit);
+            bounds.setFromCenterAndSize(new THREE.Vector3(), size.multiplyScalar(fit));
+            bounds.expandByScalar(0.12);
+            return { fitted: fitted, bounds: bounds };
+        }
+
+        ARTIFACT_CATALOG.forEach((artifact) => {
+            const holder = new THREE.Group();
+            holder.name = artifact.fileName;
+            holder.position.set(
+                (Math.random() - 0.5) * 15,
+                (Math.random() - 0.5) * 15,
+                (Math.random() - 0.5) * 8 - 5
+            );
+            holder.rotation.set(
+                Math.random() * Math.PI,
+                Math.random() * Math.PI,
+                Math.random() * Math.PI
+            );
+            holder.userData = {
+                fileName: artifact.fileName,
+                isArtifact: true,
+                ready: false,
+                bounds: null,
+                rotSpeedX: (Math.random() - 0.5) * 0.02,
+                rotSpeedY: (Math.random() - 0.5) * 0.02,
+                rotSpeedZ: (Math.random() - 0.5) * 0.02,
+                floatSpeed: Math.random() * 0.01 + 0.005,
+                floatOffset: Math.random() * Math.PI * 2,
+                baseY: holder.position.y
+            };
+            enableArtifactRaycast(holder);
+            artifacts.push(holder);
+            artifactGroup.add(holder);
+
+            gltfLoader.load('./3D/' + artifact.fileName, (gltf) => {
+                const model = gltf.scene;
+                const fit = fitLoadedModel(model);
+                model.traverse((child) => {
+                    if (child.isMesh) child.raycast = function () {};
+                });
+                applyEnvironment(model);
+                holder.add(fit.fitted);
+                holder.userData.bounds = fit.bounds;
+                holder.userData.ready = true;
+            }, undefined, (error) => {
+                console.error('Failed to load ' + artifact.fileName, error);
+            });
+        });
+
+        const particleGeo = new THREE.BufferGeometry();
+        const particleCount = 1000;
+        const posArray = new Float32Array(particleCount * 3);
+
+        for(let i = 0; i < particleCount * 3; i++) {
+            posArray[i] = (Math.random() - 0.5) * 40; // Spread wide
+        }
+        particleGeo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+        
+        const particleMat = new THREE.PointsMaterial({
+            size: 0.05,
+            color: 0x88aaff,
+            transparent: true,
+            opacity: 0.6,
+            blending: THREE.AdditiveBlending
+        });
+        
+        const particleMesh = new THREE.Points(particleGeo, particleMat);
+        scene.add(particleMesh);
+
+        let targetTearWidth = 0.0;
+        let currentTearWidth = 0.0;
+        let hasInitialized = false;
+
+        // Closed until a deliberate horizontal pull locks the bag open.
+        let isRippedOpen = false;
+        let tearBaseline = null;
+        let smoothedSeparation = null;
+        let tearConfirmFrames = 0;
+        // Extra horizontal separation, beyond wherever the hands started,
+        // required before the tear can lock. ~9% of the frame.
+        const TEAR_PULL_THRESHOLD = 0.09;
+        const TEAR_CONFIRM_FRAMES = 2;
+
+        // Pinch is inert until isRippedOpen. One pinching hand grabs the
+        // nearest artifact, drags it, and twists it with the palm.
+        // A successful grab opens the specimen placard; release closes it.
+        let grabbedMesh = null;
+        let grabbingHandLabel = null;
+        let grabDepth = 0;
+        let lastPalmAngle = 0;
+        const grabOffset = new THREE.Vector3();
+        const pinchPointer = new THREE.Vector2();
+        const raycaster = new THREE.Raycaster();
+        const handWorld = new THREE.Vector3();
+        const meshWorld = new THREE.Vector3();
+        const viewAxis = new THREE.Vector3();
+        const PINCH_ENGAGE = 0.45;
+        const PINCH_RELEASE = 0.62;
+
+        const cursorEls = [0, 1].map(() => {
+            const el = document.createElement('div');
+            el.className = 'hand-cursor';
+            document.getElementById('hand-cursors').appendChild(el);
+            return el;
+        });
+        const cursorPinched = [false, false];
+
+        // Close-up lives in its own scene so the held model can spin
+        // inside the placard without moving the copy in the void.
+        const previewEl = document.getElementById('artifact-preview');
+        const previewScene = new THREE.Scene();
+        const previewCamera = new THREE.PerspectiveCamera(32, 1, 0.01, 50);
+        previewCamera.position.set(0.75, 0.42, 3.5);
+        previewCamera.lookAt(0, 0, 0);
+        const previewRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        previewRenderer.setClearColor(0x000000, 0);
+        previewRenderer.outputEncoding = THREE.sRGBEncoding;
+        previewRenderer.toneMapping = THREE.ACESFilmicToneMapping;
+        previewRenderer.toneMappingExposure = 1.15;
+        previewEl.appendChild(previewRenderer.domElement);
+        previewScene.add(new THREE.AmbientLight(0xffffff, 0.6));
+        const previewKey = new THREE.DirectionalLight(0xfff1df, 1.25);
+        previewKey.position.set(3, 4, 5);
+        previewScene.add(previewKey);
+        const previewRim = new THREE.DirectionalLight(0x9eb6ff, 0.55);
+        previewRim.position.set(-4, 1, -2);
+        previewScene.add(previewRim);
+        let previewPivot = null;
+        let previewFileName = null;
+        const previewBox = new THREE.Box3();
+        const previewSizeVec = new THREE.Vector3();
+        const previewCenterVec = new THREE.Vector3();
+
+        function resizePreview() {
+            const size = Math.round(previewEl.clientWidth);
+            if (!size) return;
+            previewRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            previewRenderer.setSize(size, size);
+            previewCamera.aspect = 1;
+            previewCamera.updateProjectionMatrix();
+        }
+
+        function framePreviewObject(object) {
+            object.position.set(0, 0, 0);
+            object.rotation.set(0, 0, 0);
+            object.scale.set(1, 1, 1);
+            object.updateMatrixWorld(true);
+            previewBox.setFromObject(object);
+            if (previewBox.isEmpty()) return;
+            previewBox.getSize(previewSizeVec);
+            previewBox.getCenter(previewCenterVec);
+            const maxDim = Math.max(previewSizeVec.x, previewSizeVec.y, previewSizeVec.z, 0.001);
+            const fit = 1.45 / maxDim;
+            object.scale.setScalar(fit);
+            object.position.set(
+                -previewCenterVec.x * fit,
+                -previewCenterVec.y * fit,
+                -previewCenterVec.z * fit
+            );
+        }
+
+        function isolatePreviewMaterials(object) {
+            object.traverse((child) => {
+                if (!child.isMesh || !child.material) return;
+                const sources = Array.isArray(child.material) ? child.material : [child.material];
+                const clones = sources.map((mat) => {
+                    if (!mat) return mat;
+                    const copy = mat.clone();
+                    // envMap belongs to the void renderer. The placard uses its own scene.environment.
+                    copy.envMap = null;
+                    copy.needsUpdate = true;
+                    return copy;
+                });
+                child.material = Array.isArray(child.material) ? clones : clones[0];
+            });
+        }
+
+        function disposePreviewMaterials(object) {
+            object.traverse((child) => {
+                if (!child.isMesh || !child.material) return;
+                const materials = Array.isArray(child.material) ? child.material : [child.material];
+                for (let i = 0; i < materials.length; i++) {
+                    if (materials[i]) materials[i].dispose();
+                }
+            });
+        }
+
+        function clearPreviewModel() {
+            if (!previewPivot) return;
+            disposePreviewMaterials(previewPivot);
+            previewScene.remove(previewPivot);
+            previewPivot = null;
+            previewRenderer.clear();
+        }
+
+        function showArtifactCard(mesh) {
+            const meta = artifactsByFileName[mesh.userData.fileName];
+            if (!meta) return;
+            document.getElementById('artifact-index').textContent = 'No. ' + String(meta.id).padStart(2, '0');
+            document.getElementById('artifact-title').textContent = meta.title;
+            document.getElementById('artifact-year').textContent = meta.year;
+            document.getElementById('artifact-summary').textContent = meta.summary;
+            const rarityEl = document.getElementById('artifact-rarity');
+            rarityEl.textContent = meta.rarity;
+            rarityEl.dataset.rarity = meta.rarity;
+            document.getElementById('artifact-value').textContent = meta.value;
+
+            clearPreviewModel();
+            const clone = mesh.clone(true);
+            isolatePreviewMaterials(clone);
+            framePreviewObject(clone);
+            previewPivot = new THREE.Group();
+            previewPivot.add(clone);
+            previewScene.add(previewPivot);
+            previewFileName = meta.fileName;
+            resizePreview();
+            previewRenderer.render(previewScene, previewCamera);
+
+            const panel = document.getElementById('artifact-panel');
+            panel.dataset.file = meta.fileName;
+            panel.classList.add('visible');
+            panel.setAttribute('aria-hidden', 'false');
+        }
+
+        function hideArtifactCard() {
+            const panel = document.getElementById('artifact-panel');
+            panel.classList.remove('visible');
+            panel.setAttribute('aria-hidden', 'true');
+            delete panel.dataset.file;
+            clearPreviewModel();
+            previewFileName = null;
+        }
+
+        const videoElement = document.getElementById('input-video');
+
+        function setStatus(mode) {
+            const searching = document.getElementById('status-searching');
+            const oneHand = document.getElementById('status-one-hand');
+            const detected = document.getElementById('status-detected');
+            const show = (el, on) => {
+                el.classList.toggle('hidden', !on);
+                el.classList.toggle('flex', on);
+                el.classList.toggle('visible', on);
+            };
+            show(searching, mode === 'searching');
+            show(oneHand, mode === 'one');
+            show(detected, mode === 'two');
+        }
+
+        function updateTearGesture(landmarks) {
+            if (!landmarks || landmarks.length < 2) {
+                tearBaseline = null;
+                smoothedSeparation = null;
+                tearConfirmFrames = 0;
+                targetTearWidth = 0.0;
+                return;
+            }
+
+            const indexA = landmarks[0][8];
+            const indexB = landmarks[1][8];
+            const dx = Math.abs(indexA.x - indexB.x);
+            const dy = Math.abs(indexA.y - indexB.y);
+
+            // Reject single-frame jumps so a tracking glitch cannot rip the bag.
+            let sample = dx;
+            if (smoothedSeparation !== null) {
+                sample = Math.max(smoothedSeparation - 0.12, Math.min(smoothedSeparation + 0.12, dx));
+            }
+            smoothedSeparation = smoothedSeparation === null
+                ? sample
+                : smoothedSeparation + (sample - smoothedSeparation) * 0.5;
+
+            if (tearBaseline === null) {
+                tearBaseline = smoothedSeparation;
+            } else if (smoothedSeparation < tearBaseline) {
+                // Follow hands inward slowly. A one-frame dip cannot collapse the rest pose.
+                tearBaseline = Math.max(smoothedSeparation, tearBaseline - 0.008);
+            }
+
+            // A mostly vertical stretch is not a tear. Diagonal pulls still count.
+            if (dx < dy * 0.65) {
+                tearConfirmFrames = 0;
+                targetTearWidth += (0 - targetTearWidth) * 0.25;
+                return;
+            }
+
+            const pull = Math.max(0, smoothedSeparation - tearBaseline);
+            targetTearWidth = Math.min(pull / TEAR_PULL_THRESHOLD, 1);
+
+            if (pull >= TEAR_PULL_THRESHOLD) {
+                tearConfirmFrames += 1;
+                if (tearConfirmFrames >= TEAR_CONFIRM_FRAMES && !isRippedOpen) {
+                    isRippedOpen = true;
+                    targetTearWidth = 1.5;
+                    document.getElementById('ui-layer').style.opacity = '0';
+                    playTearOnce();
+                }
+            } else {
+                tearConfirmFrames = 0;
+            }
+        }
+
+        function pinchRatio(hand) {
+            const gap = Math.hypot(hand[4].x - hand[8].x, hand[4].y - hand[8].y);
+            const palm = Math.hypot(hand[0].x - hand[9].x, hand[0].y - hand[9].y);
+            if (palm < 0.02) return 1;
+            return gap / palm;
+        }
+
+        function handPointer(hand) {
+            // Landmarks are unmirrored; the preview is flipped to match the user.
+            const tipX = (hand[4].x + hand[8].x) * 0.5;
+            const tipY = (hand[4].y + hand[8].y) * 0.5;
+            return { x: 1 - tipX, y: tipY };
+        }
+
+        function palmAngle(hand) {
+            const dx = (1 - hand[9].x) - (1 - hand[0].x);
+            const dy = hand[9].y - hand[0].y;
+            return Math.atan2(dy, dx);
+        }
+
+        function pointerToWorld(nx, ny, depth) {
+            pinchPointer.set(nx * 2 - 1, -(ny * 2 - 1));
+            raycaster.setFromCamera(pinchPointer, camera);
+            return raycaster.ray.at(depth, handWorld);
+        }
+
+        function artifactFromObject(object) {
+            let current = object;
+            while (current) {
+                if (current.userData && current.userData.isArtifact) return current;
+                current = current.parent;
+            }
+            return null;
+        }
+
+        function pickArtifact(nx, ny) {
+            pinchPointer.set(nx * 2 - 1, -(ny * 2 - 1));
+            raycaster.setFromCamera(pinchPointer, camera);
+            const hits = raycaster.intersectObjects(artifacts, true);
+            for (let i = 0; i < hits.length; i++) {
+                const root = artifactFromObject(hits[i].object);
+                if (root) return root;
+            }
+            return null;
+        }
+
+        function releaseGrab() {
+            const hadGrab = !!grabbedMesh;
+            if (grabbedMesh) grabbedMesh.userData.baseY = grabbedMesh.position.y;
+            grabbedMesh = null;
+            grabbingHandLabel = null;
+            if (hadGrab) hideArtifactCard();
+        }
+
+        function updatePinchInteraction(results) {
+            const landmarks = results.multiHandLandmarks || [];
+            const handedness = results.multiHandedness || [];
+            let chosen = null;
+            let chosenLabel = null;
+            let chosenRatio = Infinity;
+
+            for (let i = 0; i < landmarks.length; i++) {
+                const label = handedness[i] && handedness[i].label ? handedness[i].label : String(i);
+                const ratio = pinchRatio(landmarks[i]);
+                const isCurrent = grabbedMesh && label === grabbingHandLabel;
+                const engaged = isCurrent ? ratio < PINCH_RELEASE : ratio < PINCH_ENGAGE;
+                if (!engaged) continue;
+                if (isCurrent || ratio < chosenRatio) {
+                    chosen = landmarks[i];
+                    chosenLabel = label;
+                    chosenRatio = ratio;
+                    if (isCurrent) break;
+                }
+            }
+
+            if (!chosen) {
+                releaseGrab();
+                return;
+            }
+
+            const pointer = handPointer(chosen);
+            const angle = palmAngle(chosen);
+
+            if (!grabbedMesh || grabbingHandLabel !== chosenLabel) {
+                const mesh = pickArtifact(pointer.x, pointer.y);
+                if (!mesh) {
+                    releaseGrab();
+                    return;
+                }
+                mesh.getWorldPosition(meshWorld);
+                grabDepth = camera.position.distanceTo(meshWorld);
+                pointerToWorld(pointer.x, pointer.y, grabDepth);
+                grabOffset.copy(meshWorld).sub(handWorld);
+                const nextFile = mesh.userData.fileName;
+                grabbedMesh = mesh;
+                grabbingHandLabel = chosenLabel;
+                lastPalmAngle = angle;
+                if (previewFileName !== nextFile) showArtifactCard(mesh);
+                return;
+            }
+
+            pointerToWorld(pointer.x, pointer.y, grabDepth);
+            meshWorld.copy(handWorld).add(grabOffset);
+            artifactGroup.worldToLocal(meshWorld);
+            grabbedMesh.position.copy(meshWorld);
+
+            let dAngle = angle - lastPalmAngle;
+            if (dAngle > Math.PI) dAngle -= Math.PI * 2;
+            if (dAngle < -Math.PI) dAngle += Math.PI * 2;
+            if (Math.abs(dAngle) < 0.45) {
+                camera.getWorldDirection(viewAxis);
+                grabbedMesh.rotateOnWorldAxis(viewAxis, -dAngle);
+            }
+            lastPalmAngle = angle;
+        }
+
+        function updateHandCursors(results) {
+            const landmarks = results.multiHandLandmarks || [];
+            for (let i = 0; i < cursorEls.length; i++) {
+                const el = cursorEls[i];
+                const hand = landmarks[i];
+                if (!hand) {
+                    cursorPinched[i] = false;
+                    el.classList.remove('visible', 'pinched');
+                    continue;
+                }
+                const pointer = handPointer(hand);
+                el.style.left = (pointer.x * window.innerWidth) + 'px';
+                el.style.top = (pointer.y * window.innerHeight) + 'px';
+                el.classList.add('visible');
+                if (isRippedOpen) {
+                    const limit = cursorPinched[i] ? PINCH_RELEASE : PINCH_ENGAGE;
+                    cursorPinched[i] = pinchRatio(hand) < limit;
+                } else {
+                    cursorPinched[i] = false;
+                }
+                el.classList.toggle('pinched', cursorPinched[i]);
+            }
+        }
+
+        function onResults(results) {
+            if (!hasInitialized) {
+                hasInitialized = true;
+                document.getElementById('status-loading').classList.add('hidden');
+                setStatus('searching');
+            }
+
+            updateHandCursors(results);
+
+            const landmarks = results.multiHandLandmarks;
+
+            // State 1 — closed. Tearing is the only gesture that runs.
+            if (!isRippedOpen) {
+                if (!landmarks || landmarks.length === 0) setStatus('searching');
+                else if (landmarks.length === 1) setStatus('one');
+                else setStatus('two');
+                updateTearGesture(landmarks);
+                return;
+            }
+
+            // State 2 — open. Tear math is never called again.
+            updatePinchInteraction(results);
+        }
+
+        const hands = new Hands({
+            locateFile: (file) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+            }
+        });
+
+        hands.setOptions({
+            maxNumHands: 2, // We need 2 hands for the tearing gesture
+            modelComplexity: 1,
+            minDetectionConfidence: 0.65,
+            minTrackingConfidence: 0.65
+        });
+        hands.onResults(onResults);
+
+        const cameraUtils = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            width: 640,
+            height: 480
+        });
+        cameraUtils.start();
+
+        
+        function resizePlaneToFOV() {
+            // Calculate required plane size to cover the camera frustum at z = -1
+            const fov = camera.fov * (Math.PI / 180);
+            const height = 2 * Math.tan(fov / 2) * Math.abs(tearPlane.position.z);
+            const width = height * camera.aspect;
+            tearPlane.scale.set(width, height, 1);
+            tearMaterial.uniforms.u_aspect.value = camera.aspect;
+        }
+        
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            resizePlaneToFOV();
+            resizePreview();
+        }, false);
+        
+        // Initial sizing
+        resizePlaneToFOV();
+        resizePreview();
+
+        const clock = new THREE.Clock();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const time = clock.getElapsedTime();
+
+            // Closed: follow the pull. Open: finish the rip once, then leave the shader alone.
+            if (!isRippedOpen) {
+                currentTearWidth += (targetTearWidth - currentTearWidth) * 0.08;
+                tearMaterial.uniforms.u_tearWidth.value = currentTearWidth;
+            } else if (currentTearWidth < 1.49) {
+                currentTearWidth += (1.5 - currentTearWidth) * 0.1;
+                tearMaterial.uniforms.u_tearWidth.value = currentTearWidth;
+            }
+            tearMaterial.uniforms.u_time.value = time;
+
+            // Animate artifacts. A pinched artifact is driven only by the hand.
+            artifacts.forEach(obj => {
+                if (obj === grabbedMesh) return;
+                const data = obj.userData;
+                obj.rotation.x += data.rotSpeedX;
+                obj.rotation.y += data.rotSpeedY;
+                obj.rotation.z += data.rotSpeedZ;
+                obj.position.y = data.baseY + Math.sin(time * 2.0 * data.floatSpeed + data.floatOffset) * 0.5;
+            });
+
+            // Slowly rotate the entire void for cinematic feel
+            artifactGroup.rotation.y = Math.sin(time * 0.05) * 0.2;
+            artifactGroup.rotation.x = Math.cos(time * 0.05) * 0.1;
+
+            // Slowly drift particles
+            particleMesh.rotation.y = time * 0.02;
+
+            renderer.render(scene, camera);
+
+            if (previewPivot) {
+                previewPivot.rotation.y += 0.006;
+                previewRenderer.render(previewScene, previewCamera);
+            }
+        }
+
+        // Start animation loop
+        window.onload = () => {
+            animate();
+        };
+    </script>
+</body>
+</html>
