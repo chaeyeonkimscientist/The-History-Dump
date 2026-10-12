@@ -20,7 +20,7 @@
         #canvas-container { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1; }
         .webcam-feed { position: absolute; bottom: 20px; right: 20px; width: 160px; height: 120px; border-radius: 8px; border: 2px solid #333; object-fit: cover; transform: scaleX(-1); z-index: 20; opacity: 0.3; }
         
-        #ui-layer { position: absolute; inset: 0; z-index: 50; display: flex; flex-direction: column; align-items: center; justify-content: center; background: rgba(5,5,5,0.8); transition: opacity 1s ease; backdrop-filter: blur(5px); pointer-events: none; }
+        #ui-layer { position: absolute; inset: 0; z-index: 50; display: flex; flex-direction: column; align-items: center; justify-content: center; background: transparent; transition: opacity 1s ease; pointer-events: none; }
         .instruction-text { opacity: 0; transition: opacity 0.5s ease; transform: translateY(10px); }
         .instruction-text.visible { opacity: 1; transform: translateY(0); }
 
@@ -322,10 +322,11 @@
         // We use a plane placed right in front of the camera that scales to fit the FOV
         const planeGeo = new THREE.PlaneGeometry(1, 1, 64, 64);
 
-        const bagTexture = new THREE.TextureLoader().load('./trash_bag_texture.jpg', (texture) => {
+        const bagTexture = new THREE.TextureLoader().load(new URL('trash_bag_texture.jpg', window.location.href).href, (texture) => {
             tearMaterial.uniforms.uTextureSize.value.set(texture.image.width, texture.image.height);
         });
-        bagTexture.encoding = THREE.sRGBEncoding;
+        // This shader writes the photo straight to the screen. Marking it sRGB
+        // makes Three decode it to linear first, which turns the bag black.
         bagTexture.wrapS = THREE.ClampToEdgeWrapping;
         bagTexture.wrapT = THREE.ClampToEdgeWrapping;
         bagTexture.minFilter = THREE.LinearFilter;
@@ -426,12 +427,16 @@
                 }
             `,
             side: THREE.DoubleSide,
-            transparent: true // Necessary for discard to reveal background
+            transparent: true, // Necessary for discard to reveal background
+            depthTest: false,
+            depthWrite: false
         });
 
         const tearPlane = new THREE.Mesh(planeGeo, tearMaterial);
-        // Place plane directly in front of the camera
+        // Place plane directly in front of the camera, drawn after the artifacts
+        // so the tear can reveal them.
         tearPlane.position.z = -1;
+        tearPlane.renderOrder = 999;
         camera.add(tearPlane);
 
         const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
@@ -565,7 +570,7 @@
             artifacts.push(holder);
             artifactGroup.add(holder);
 
-            gltfLoader.load('./3D/' + artifact.fileName, (gltf) => {
+            gltfLoader.load(new URL('3D/' + artifact.fileName, window.location.href).href, (gltf) => {
                 const model = gltf.scene;
                 const fit = fitLoadedModel(model);
                 model.traverse((child) => {
@@ -1083,10 +1088,9 @@
             }
         }
 
-        // Start animation loop
-        window.onload = () => {
-            animate();
-        };
+        // Start immediately. Waiting for window.onload lets a slow asset
+        // keep the bag and the artifacts from ever drawing.
+        animate();
     </script>
 </body>
 </html>
